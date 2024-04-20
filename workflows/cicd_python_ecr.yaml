@@ -1,0 +1,92 @@
+name: CI/CD - Python App - ECR
+
+on:
+  workflow_dispatch:
+    inputs:
+      env-choice:
+        type: choice
+        description: Select the Environment
+        options:
+        - dev
+        - stage
+        - prod
+      helm-choice:
+        type: choice
+        description: Select the Helm action
+        options:
+        - install
+        - upgrade
+        - uninstall
+
+env:
+  aws_region: 'us-east-1'
+  app_working_dir: 'app/'
+  ecr_name: ''
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env-choice }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+
+      - name: Install dependencies
+        working-directory: ${{ env.app_working_dir }}
+        run: poetry install
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4.1.0
+        id: install_helm
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1-node16
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT }}:role/github-actions-oidc-role
+          aws-region: ${{ env.aws_region }}
+
+      - name: Build Docker image
+        working-directory: ${{ env.app_working_dir }}
+        run: |
+          docker build . -t python-app:latest
+          docker tag python-app:latest ${{ env.ecr_name }}.XXXXX/python-app:latest
+          docker push ${{ env.ecr_name }}.XXXXX/python-app:latest
+
+      - uses: azure/setup-kubectl@v3
+        id: install_kubectl
+
+      - uses: azure/k8s-set-context@v3
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+          context: ${{ inputs.env-choice }}-eks-cluster
+
+      - name: Helm Install app
+        if: inputs.helm-choice == 'install'
+        working-directory: ${{ env.app_working_dir }}/helm
+        run: |
+          echo -n "  connection_string: "${{ secrets.MONGODB_CONNECTION_STRING }}"" >> values-${{ inputs.env-choice }}.yaml
+          helm install app --kube-context ${{ inputs.env-choice }}-eks-cluster -f values-${{ inputs.env-choice }}.yaml .
+
+      - name: Helm Upgrade app
+        if: inputs.helm-choice == 'upgrade'
+        working-directory: ${{ env.app_working_dir }}/helm
+        run: |
+          echo -n "  connection_string: "${{ secrets.MONGODB_CONNECTION_STRING }}"" >> values-${{ inputs.env-choice }}.yaml
+          helm upgrade app --kube-context ${{ inputs.env-choice }}-eks-cluster -f values-${{ inputs.env-choice }}.yaml .
+
+      - name: Helm Uninstall app
+        if: inputs.helm-choice == 'uninstall'
+        working-directory: ${{ env.app_working_dir }}/helm
+        run: |
+          helm uninstall app --kube-context ${{ inputs.env-choice }}-eks-cluster
+
